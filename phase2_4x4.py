@@ -378,67 +378,61 @@ class OptimizedPuzzleDataset(Dataset):
         return self.cached_data[idx]
 
 class EnhancedNumpuzNetwork(nn.Module):
-    def __init__(self, board_size=4, hidden_layers=[1024, 512, 256, 128]):  # Tăng layers
+    def __init__(self, board_size=4, hidden_layers=[512, 256, 128]):
         super(EnhancedNumpuzNetwork, self).__init__()
         self.board_size = board_size
         self.total_tiles = board_size * board_size
         self.input_size = self.total_tiles * 3
+        self.hidden_layers_config = hidden_layers
         
-        # Thêm residual connections
+        # Input batch normalization
         self.input_bn = nn.BatchNorm1d(self.input_size)
         
-        # Tăng số layer và units
-        self.layer1 = nn.Sequential(
-            nn.Linear(self.input_size, hidden_layers[0]),
-            nn.BatchNorm1d(hidden_layers[0]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)
-        )
+        # Build hidden layers dynamically
+        layers = []
+        prev_size = self.input_size
+        dropout_rates = [0.3, 0.25, 0.2, 0.15]  # Decreasing dropout
         
-        self.layer2 = nn.Sequential(
-            nn.Linear(hidden_layers[0], hidden_layers[1]),
-            nn.BatchNorm1d(hidden_layers[1]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.25)
-        )
+        for idx, hidden_size in enumerate(hidden_layers):
+            dropout = dropout_rates[min(idx, len(dropout_rates)-1)]
+            layers.append(nn.Sequential(
+                nn.Linear(prev_size, hidden_size),
+                nn.BatchNorm1d(hidden_size),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout)
+            ))
+            prev_size = hidden_size
         
-        self.layer3 = nn.Sequential(
-            nn.Linear(hidden_layers[1], hidden_layers[2]),
-            nn.BatchNorm1d(hidden_layers[2]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2)
-        )
+        self.hidden_layers = nn.ModuleList(layers)
         
-        self.layer4 = nn.Sequential(
-            nn.Linear(hidden_layers[2], hidden_layers[3]),
-            nn.BatchNorm1d(hidden_layers[3]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.15)
-        )
+        # Output heads use the last hidden layer size
+        last_hidden_size = hidden_layers[-1]
         
-        # Enhanced output heads
+        # Enhanced policy head
         self.policy_head = nn.Sequential(
-            nn.Linear(hidden_layers[3], 512),
+            nn.Linear(last_hidden_size, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 4)
-        )
-        
-        self.value_head = nn.Sequential(
-            nn.Linear(hidden_layers[3], 256),
-            nn.ReLU(inplace=True),
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
+            nn.Linear(128, 4)
+        )
+        
+        # Value head
+        self.value_head = nn.Sequential(
+            nn.Linear(last_hidden_size, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 1),
             nn.Tanh()
         )
         
+        # Difficulty classification head
         self.difficulty_head = nn.Sequential(
-            nn.Linear(hidden_layers[3], 128),
+            nn.Linear(last_hidden_size, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(128, 4)
+            nn.Linear(64, 4)
         )
         
         # Initialize weights
@@ -458,8 +452,9 @@ class EnhancedNumpuzNetwork(nn.Module):
         # Input batch normalization
         x = self.input_bn(x)
         
-        # Hidden layers
-        x = self.hidden_layers(x)
+        # Pass through hidden layers
+        for layer in self.hidden_layers:
+            x = layer(x)
         
         # Outputs
         policy = self.policy_head(x)
@@ -480,7 +475,7 @@ class OptimizedPhase2Trainer:
         # Initialize model with transfer learning
         self.model = self._initialize_model_with_transfer()
         
-        # Setup optimizer and scheduler
+        # Setup optimizer (scheduler sẽ được tạo sau khi biết steps_per_epoch)
         self.optimizer, self.scheduler = self._setup_optimizer_scheduler()
         
         # Enhanced loss functions with label smoothing
@@ -504,8 +499,7 @@ class OptimizedPhase2Trainer:
         
         model = EnhancedNumpuzNetwork(
             board_size=self.config["board_size"],
-            hidden_layers=self.config["hidden_layers"],
-            transfer_config=self.config["transfer_learning"]
+            hidden_layers=self.config["hidden_layers"]
         ).to(self.device)
         
         # Load pre-trained 3x3 model for transfer learning
@@ -563,7 +557,7 @@ class OptimizedPhase2Trainer:
         
         return model
     
-    def _setup_optimizer_scheduler(self):
+    def _setup_optimizer_scheduler(self, steps_per_epoch=None):
         """Setup optimizer with layer-wise learning rates and scheduler"""
         
         # Parameter groups for different learning rates
@@ -610,16 +604,18 @@ class OptimizedPhase2Trainer:
         
         optimizer = optim.AdamW(param_groups)
         
-        # Learning rate scheduler
-        scheduler = optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=[pg['lr'] for pg in param_groups],
-            epochs=self.config["epochs"],
-            steps_per_epoch=self.config.get("steps_per_epoch", 100),
-            pct_start=0.1,
-            div_factor=10.0,
-            final_div_factor=100.0
-        )
+        # Learning rate scheduler - chỉ khởi tạo nếu có steps_per_epoch
+        scheduler = None
+        if steps_per_epoch is not None:
+            scheduler = optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=[pg['lr'] for pg in param_groups],
+                epochs=self.config["epochs"],
+                steps_per_epoch=steps_per_epoch,
+                pct_start=0.1,
+                div_factor=10.0,
+                final_div_factor=100.0
+            )
         
         return optimizer, scheduler
     
@@ -780,8 +776,9 @@ class OptimizedPhase2Trainer:
                 persistent_workers=True
             )
             
-            # Update steps_per_epoch for scheduler
-            self.config["steps_per_epoch"] = len(train_loader)
+            # Tạo lại scheduler với đúng steps_per_epoch
+            steps_per_epoch = len(train_loader)
+            self.optimizer, self.scheduler = self._setup_optimizer_scheduler(steps_per_epoch)
             
         except Exception as e:
             print(f"❌ Error loading dataset: {e}")
@@ -944,7 +941,7 @@ def run_complete_phase2():
             "difficulty": 0.1
         },
         "transfer_learning": {
-            "pretrained_path": "models/numpuz_3x3_foundation.pth",
+            "pretrained_path": "numpuz_3x3_foundation.pth",
             "frozen_layers": ["hidden_layers.0", "hidden_layers.3"],  # First two hidden layers
             "fine_tune_layers": ["hidden_layers.6", "policy_head", "value_head"],
         }
