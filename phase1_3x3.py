@@ -859,25 +859,25 @@ class OptimizedPhase1Trainer:
     def save_final_artifacts(self):
         """Save all final artifacts (FLOW.md compliant) + create ZIP archive"""
         
-        # Save final model
+        # Save final model (foundation.pth - sẽ bị xóa sau cleanup)
         self.save_checkpoint(f"numpuz_{self.board_size}x{self.board_size}_foundation.pth")
         
-        # Save training history
+        # Save training history (NO timestamp)
         history_file = f"models/training_history_{self.board_size}x{self.board_size}.json"
         with open(history_file, 'w') as f:
             json.dump(self.history, f, indent=2)
         logger.info(f"📊 Training history saved: {history_file}")
         
-        # Generate and save plots
+        # Generate and save plots (NO timestamp)
         self.generate_training_plots()
         
-        # Save configuration
+        # Save configuration (NO timestamp)
         config_file = f"models/train_config_{self.board_size}x{self.board_size}.yaml"
         with open(config_file, 'w') as f:
             yaml.dump(self.config, f, default_flow_style=False)
         logger.info(f"⚙️  Training config saved: {config_file}")
         
-        # Save model architecture
+        # Save model architecture (NO timestamp)
         model_config = {
             'board_size': self.board_size,
             'input_size': self.model.input_size,
@@ -890,7 +890,10 @@ class OptimizedPhase1Trainer:
             json.dump(model_config, f, indent=2)
         logger.info(f"🧠 Model config saved: {model_config_file}")
         
-        # Create comprehensive ZIP archive
+        # ⚠️ CLEANUP FIRST - Remove unnecessary files BEFORE creating ZIP
+        self._cleanup_training_files()
+        
+        # Create comprehensive ZIP archive (only with cleaned files)
         try:
             logger.info("Starting ZIP archive creation...")
             zip_result = self._create_zip_archive()
@@ -1253,6 +1256,122 @@ class OptimizedPhase1Trainer:
             logger.error(traceback.format_exc())
             logger.error(f"{'='*80}\n")
             return None
+        
+    def _cleanup_training_files(self):
+        """Clean up unnecessary training files to keep only essential artifacts"""
+        
+        logger.info("\n" + "="*80)
+        logger.info("🧹 CLEANUP: Removing unnecessary training files")
+        logger.info("="*80)
+        
+        import glob
+        import os
+        
+        cleanup_stats = {
+            'removed_files': 0,
+            'kept_files': 0,
+            'freed_space_mb': 0.0
+        }
+        
+        # 1. Remove timestamped duplicate files
+        logger.info("\n📂 Cleaning duplicate timestamped files...")
+        
+        patterns_to_clean = [
+            'models/training_history_3x3_*.json',
+            'models/train_config_3x3_*.yaml',
+            'models/model_config_3x3_*.json',
+            'training_plots/training_curves_3x3_*.png'
+        ]
+        
+        for pattern in patterns_to_clean:
+            files = glob.glob(pattern)
+            if files:
+                # Keep only files WITHOUT timestamp (clean names)
+                files_to_remove = [f for f in files if any(char.isdigit() for char in Path(f).stem.split('_')[-1])]
+                
+                for file_path in files_to_remove:
+                    try:
+                        file_size = Path(file_path).stat().st_size / (1024**2)
+                        os.remove(file_path)
+                        cleanup_stats['removed_files'] += 1
+                        cleanup_stats['freed_space_mb'] += file_size
+                        logger.info(f"  ✓ Removed: {file_path} ({file_size:.2f} MB)")
+                    except Exception as e:
+                        logger.warning(f"  ✗ Failed to remove {file_path}: {e}")
+        
+        # 2. Remove intermediate epoch checkpoints (keep only best and foundation)
+        logger.info("\n📂 Cleaning intermediate checkpoint files...")
+        
+        checkpoint_files = glob.glob('models/numpuz_3x3_epoch_*.pth')
+        for ckpt_file in checkpoint_files:
+            try:
+                file_size = Path(ckpt_file).stat().st_size / (1024**2)
+                os.remove(ckpt_file)
+                cleanup_stats['removed_files'] += 1
+                cleanup_stats['freed_space_mb'] += file_size
+                logger.info(f"  ✓ Removed: {ckpt_file} ({file_size:.2f} MB)")
+            except Exception as e:
+                logger.warning(f"  ✗ Failed to remove {ckpt_file}: {e}")
+        
+        # 3. Keep only the latest log file
+        logger.info("\n📂 Cleaning old log files...")
+        
+        log_files = glob.glob('training_phase1*.log')
+        if len(log_files) > 1:
+            # Sort by modification time
+            log_files_sorted = sorted(log_files, key=lambda x: os.path.getmtime(x), reverse=True)
+            
+            # Keep the newest one, remove the rest
+            for log_file in log_files_sorted[1:]:
+                try:
+                    file_size = Path(log_file).stat().st_size / (1024**2)
+                    os.remove(log_file)
+                    cleanup_stats['removed_files'] += 1
+                    cleanup_stats['freed_space_mb'] += file_size
+                    logger.info(f"  ✓ Removed: {log_file} ({file_size:.2f} MB)")
+                except Exception as e:
+                    logger.warning(f"  ✗ Failed to remove {log_file}: {e}")
+        
+        # 4. Remove numpuz_3x3_foundation.pth (keep only best.pth)
+        logger.info("\n📂 Removing foundation.pth (keeping best.pth)...")
+        
+        foundation_file = f'models/numpuz_{self.board_size}x{self.board_size}_foundation.pth'
+        if Path(foundation_file).exists():
+            try:
+                file_size = Path(foundation_file).stat().st_size / (1024**2)
+                os.remove(foundation_file)
+                cleanup_stats['removed_files'] += 1
+                cleanup_stats['freed_space_mb'] += file_size
+                logger.info(f"  ✓ Removed: {foundation_file} ({file_size:.2f} MB)")
+                logger.info(f"  ℹ️  Reason: best.pth has higher accuracy (kept)")
+            except Exception as e:
+                logger.warning(f"  ✗ Failed to remove {foundation_file}: {e}")
+        
+        # 5. Count remaining essential files
+        logger.info("\n📂 Counting remaining essential files...")
+        
+        essential_files = [
+            f'models/numpuz_{self.board_size}x{self.board_size}_best.pth',
+            f'models/training_history_{self.board_size}x{self.board_size}.json',
+            f'models/train_config_{self.board_size}x{self.board_size}.yaml',
+            f'models/model_config_{self.board_size}x{self.board_size}.json',
+            f'training_plots/training_curves_{self.board_size}x{self.board_size}.png'
+        ]
+        
+        for essential_file in essential_files:
+            if Path(essential_file).exists():
+                file_size = Path(essential_file).stat().st_size / (1024**2)
+                cleanup_stats['kept_files'] += 1
+                logger.info(f"  ✓ Kept: {essential_file:<60} ({file_size:.2f} MB)")
+        
+        # Summary
+        logger.info("\n" + "="*80)
+        logger.info("📊 CLEANUP SUMMARY")
+        logger.info("="*80)
+        logger.info(f"Files Removed:       {cleanup_stats['removed_files']}")
+        logger.info(f"Files Kept:          {cleanup_stats['kept_files']}")
+        logger.info(f"Space Freed:         {cleanup_stats['freed_space_mb']:.2f} MB")
+        logger.info("="*80 + "\n")
 
     def _generate_readme(self) -> str:
         """Generate README for ZIP archive"""

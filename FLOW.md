@@ -80,15 +80,16 @@ checkpointing:
 
 ```
 phrase1_output/
-├─ dataset_3x3.pkl           → Dữ liệu huấn luyện (50k puzzles + solution path)
-├─ model_3x3.pth             → Weights của model đã train
-├─ model_config_3x3.json     → Kiến trúc & phiên bản preprocessing
-├─ train_config_3x3.yaml     → Hyperparameters (như trên)
-├─ metrics_3x3.json          → win_rate, avg_moves, final_loss, val_loss
-├─ training_log_3x3.txt      → Log chi tiết (epoch, loss, lr, time)
-├─ sample_puzzles_3x3.png    → 10 puzzle mẫu (visual check)
-├─ loss_curve_3x3.png        → Loss plot (policy + value)
-└─ move_heatmap_3x3.png      → Heatmap phân bố action model chọn
+├── dataset_info.json
+├── models
+│   ├── model_config_3x3.json
+│   ├── numpuz_3x3_best.pth
+│   ├── train_config_3x3.yaml
+│   └── training_history_3x3.json
+├── README.md
+├── training_metrics.json
+└── training_plots
+    └── training_curves_3x3.png→ Heatmap phân bố action model chọn
 ```
 
 ---
@@ -99,10 +100,7 @@ phrase1_output/
 
 ```
 📥 phrase1_output/
-├─ model_3x3.pth            → Pretrained weights (feature extractor)
-├─ model_config_3x3.json    → Kiến trúc gốc (để map layer tương thích)
-├─ metrics_3x3.json         → Baseline để so sánh
-└─ train_config_3x3.yaml    → Tham chiếu hyperparams (tùy chỉnh)
+├─ numpuz_3x3_best.pth            → Pretrained weights (feature extractor)
 ```
 
 ### 🔹 Thuật toán (Dataset generation, Heuristic & Transfer)
