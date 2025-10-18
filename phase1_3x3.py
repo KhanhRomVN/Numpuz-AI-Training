@@ -31,7 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'training_phase1_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.FileHandler('training_phase1.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -709,7 +709,7 @@ class OptimizedPhase1Trainer:
         
         return self.history
     
-    def display_training_summary(self, timestamp: str):
+    def display_training_summary(self):
         """Display comprehensive training summary with visualizations"""
         
         print("\n" + "="*80)
@@ -785,7 +785,7 @@ class OptimizedPhase1Trainer:
         # 7. Training Plot
         print("\n📸 TRAINING VISUALIZATION:")
         print("-" * 80)
-        plot_file = f'training_plots/training_curves_{self.board_size}x{self.board_size}_{timestamp}.png'
+        plot_file = f'training_plots/training_curves_{self.board_size}x{self.board_size}.png'
         
         if Path(plot_file).exists():
             print(f"Plot saved at: {plot_file}")
@@ -822,9 +822,9 @@ class OptimizedPhase1Trainer:
         artifacts = [
             f"models/numpuz_{self.board_size}x{self.board_size}_foundation.pth",
             f"models/numpuz_{self.board_size}x{self.board_size}_best.pth",
-            f"models/training_history_{self.board_size}x{self.board_size}_{timestamp}.json",
-            f"models/train_config_{self.board_size}x{self.board_size}_{timestamp}.yaml",
-            f"models/model_config_{self.board_size}x{self.board_size}_{timestamp}.json",
+            f"models/training_history_{self.board_size}x{self.board_size}.json",
+            f"models/train_config_{self.board_size}x{self.board_size}.yaml",
+            f"models/model_config_{self.board_size}x{self.board_size}.json",
             plot_file
         ]
         
@@ -858,22 +858,21 @@ class OptimizedPhase1Trainer:
     
     def save_final_artifacts(self):
         """Save all final artifacts (FLOW.md compliant) + create ZIP archive"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Save final model
         self.save_checkpoint(f"numpuz_{self.board_size}x{self.board_size}_foundation.pth")
         
         # Save training history
-        history_file = f"models/training_history_{self.board_size}x{self.board_size}_{timestamp}.json"
+        history_file = f"models/training_history_{self.board_size}x{self.board_size}.json"
         with open(history_file, 'w') as f:
             json.dump(self.history, f, indent=2)
         logger.info(f"📊 Training history saved: {history_file}")
         
         # Generate and save plots
-        self.generate_training_plots(timestamp)
+        self.generate_training_plots()
         
         # Save configuration
-        config_file = f"models/train_config_{self.board_size}x{self.board_size}_{timestamp}.yaml"
+        config_file = f"models/train_config_{self.board_size}x{self.board_size}.yaml"
         with open(config_file, 'w') as f:
             yaml.dump(self.config, f, default_flow_style=False)
         logger.info(f"⚙️  Training config saved: {config_file}")
@@ -886,7 +885,7 @@ class OptimizedPhase1Trainer:
             'total_parameters': sum(p.numel() for p in self.model.parameters()),
             'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         }
-        model_config_file = f"models/model_config_{self.board_size}x{self.board_size}_{timestamp}.json"
+        model_config_file = f"models/model_config_{self.board_size}x{self.board_size}.json"
         with open(model_config_file, 'w') as f:
             json.dump(model_config, f, indent=2)
         logger.info(f"🧠 Model config saved: {model_config_file}")
@@ -894,7 +893,7 @@ class OptimizedPhase1Trainer:
         # Create comprehensive ZIP archive
         try:
             logger.info("Starting ZIP archive creation...")
-            zip_result = self._create_zip_archive(timestamp)
+            zip_result = self._create_zip_archive()
             if zip_result:
                 logger.info(f"✅ ZIP archive created: {zip_result}")
             else:
@@ -905,17 +904,17 @@ class OptimizedPhase1Trainer:
             logger.error(traceback.format_exc())
         
         # Display comprehensive training summary
-        self.display_training_summary(timestamp)
+        self.display_training_summary()
 
-    def _create_zip_archive(self, timestamp: str):
+    def _create_zip_archive(self):
         """Create ZIP archive with all Phase 1 outputs and comprehensive logging"""
         
-        zip_filename = f"phase1_output_3x3_{timestamp}.zip"
+        zip_filename = f"phase1_output_{self.board_size}x{self.board_size}.zip"
         
         print(f"\n{'='*80}")
         print("📦 ZIP ARCHIVE CREATION INITIATED")
         print(f"{'='*80}")
-        print(f"Timestamp: {timestamp}")
+        print(f"Generated: {datetime.now().isoformat()}")
         print(f"{'='*80}\n")
         
         try:
@@ -1032,7 +1031,7 @@ class OptimizedPhase1Trainer:
                         'file_size_mb': round(dataset_size, 2),
                         'location': str(Path(dataset_file).absolute()),
                         'note': 'Full dataset stored separately (too large for ZIP)',
-                        'timestamp': timestamp
+                        'last_updated': datetime.now().isoformat()
                     }
                     dataset_info_file = temp_output_dir / 'dataset_info.json'
                     with open(dataset_info_file, 'w') as f:
@@ -1095,7 +1094,7 @@ class OptimizedPhase1Trainer:
                 # 5. Add README
                 logger.info("📁 CATEGORY 5: DOCUMENTATION")
                 logger.info("-" * 80)
-                readme_content = self._generate_readme(timestamp)
+                readme_content = self._generate_readme()
                 readme_file = temp_output_dir / 'README.md'
                 with open(readme_file, 'w') as f:
                     f.write(readme_content)
@@ -1129,7 +1128,7 @@ class OptimizedPhase1Trainer:
                     'best_accuracy': float(max(self.history['train_accuracy'])) if self.history['train_accuracy'] else 0.0,
                     'average_epoch_time_seconds': float(np.mean(self.history['epoch_time'])) if self.history['epoch_time'] else 0.0,
                     'total_training_time_seconds': float(sum(self.history['epoch_time'])) if self.history['epoch_time'] else 0.0,
-                    'timestamp': timestamp
+                    'last_updated': datetime.now().isoformat()
                 }
                 metrics_file = temp_output_dir / 'training_metrics.json'
                 with open(metrics_file, 'w') as f:
@@ -1255,7 +1254,7 @@ class OptimizedPhase1Trainer:
             logger.error(f"{'='*80}\n")
             return None
 
-    def _generate_readme(self, timestamp: str) -> str:
+    def _generate_readme(self) -> str:
         """Generate README for ZIP archive"""
         
         total_time_seconds = sum(self.history['epoch_time']) if self.history['epoch_time'] else 0
@@ -1268,7 +1267,7 @@ class OptimizedPhase1Trainer:
 ## Execution Summary
 
 - **Board Size**: {self.board_size}x{self.board_size}
-- **Timestamp**: {timestamp}
+- **Last Training**: {datetime.now().isoformat()}
 - **Total Epochs Trained**: {len(self.history['epoch'])}
 - **Training Status**: {'COMPLETED' if len(self.history['epoch']) >= self.config['epochs'] else 'INTERRUPTED'}
 
@@ -1310,17 +1309,17 @@ class OptimizedPhase1Trainer:
 ### Models
 - `numpuz_3x3_foundation.pth` - Final trained model
 - `numpuz_3x3_best.pth` - Best model by accuracy
-- `model_config_3x3_*.json` - Model architecture
+- `model_config_3x3.json` - Model architecture
 
 ### Training Data
-- `training_history_3x3_*.json` - Detailed training metrics
-- `train_config_3x3_*.yaml` - Training configuration
+- `training_history_3x3.json` - Detailed training metrics
+- `train_config_3x3.yaml` - Training configuration
 
 ### Visualizations
-- `training_curves_3x3_*.png` - Training plots
+- `training_curves_3x3.png` - Training plots
 
 ### Logs
-- `training_phase1_*.log` - Training logs
+- `training_phase1.log` - Training logs
 
 ## Loss Breakdown (Last Epoch)
 
@@ -1351,7 +1350,7 @@ policy, value, difficulty = model(input_state)
         
         return readme
 
-    def generate_training_plots(self, timestamp: str):
+    def generate_training_plots(self):
         """Generate comprehensive training plots"""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle(f'NumpuzAI Training Progress - {self.board_size}x{self.board_size}', fontsize=16)
@@ -1413,7 +1412,7 @@ policy, value, difficulty = model(input_state)
         ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_file = f'training_plots/training_curves_{self.board_size}x{self.board_size}_{timestamp}.png'
+        plot_file = f'training_plots/training_curves_{self.board_size}x{self.board_size}.png'
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         plt.close()
         
