@@ -25,6 +25,8 @@ from typing import List, Tuple, Optional, Dict, Any
 import heapq
 import yaml
 import zipfile
+import pandas as pd
+from sklearn.model_selection import train_test_split 
 
 # Configure logging
 logging.basicConfig(
@@ -292,9 +294,11 @@ class EnhancedPuzzleGenerator:
 
     def generate_dataset(self, num_samples: int = 50000, 
                         output_file: str = 'puzzle_data/3x3_training_data.pkl',
-                        enable_augmentation: bool = True) -> List[Tuple]:
-        """Generate complete training dataset with optional augmentation"""
+                        enable_augmentation: bool = True,
+                        validation_split: float = 0.2) -> Tuple[List[Tuple], List[Tuple]]:
+        """Generate complete training dataset with validation split (PHASE1.md compliant)"""
         logger.info(f"🚀 Generating {num_samples} training samples for {self.board_size}x{self.board_size}")
+        logger.info(f"Validation split: {validation_split*100:.0f}%")
         logger.info(f"Augmentation: {'ENABLED' if enable_augmentation else 'DISABLED'}")
         
         Path('puzzle_data').mkdir(exist_ok=True)
@@ -323,9 +327,9 @@ class EnhancedPuzzleGenerator:
                         self.board_size, optimal_moves
                     ))
                     
-                    # Apply augmentations
+                    # Apply augmentations (GIẢM 8× → 4× theo PHASE1.md)
                     if enable_augmentation:
-                        augmentations = ['rot90', 'rot180', 'rot270', 'flip_h', 'flip_v']
+                        augmentations = ['rot90', 'rot180', 'flip_h']  # Chỉ giữ 3 augmentations chính
                         
                         for aug_type in augmentations:
                             state_aug, action_probs_aug = self.apply_augmentation(state_2d, action_probs, aug_type)
@@ -342,18 +346,36 @@ class EnhancedPuzzleGenerator:
                         'success_rate': f'{success_count/(success_count+fail_count)*100:.1f}%',
                         'augmented': f'{len(dataset)}'
                     })
-                else:
-                    fail_count += 1
+        # Split into train/val (PHASE1.md compliant)
+        logger.info(f"\n🔀 Splitting dataset: {validation_split*100:.0f}% validation")
         
-        # Save dataset
-        with open(output_file, 'wb') as f:
-            pickle.dump(dataset, f)
+        # Stratified split by difficulty
+        dataset_df = pd.DataFrame(dataset, columns=['state', 'action', 'value', 'difficulty', 'size', 'moves'])
         
-        logger.info(f"✅ Dataset saved to {output_file}")
-        logger.info(f"📊 Generated {len(dataset)} samples ({success_count} base + augmentations)")
-        logger.info(f"🎯 Success rate: {success_count/(success_count+fail_count)*100:.1f}%")
+        train_data, val_data = train_test_split(
+            dataset_df, 
+            test_size=validation_split, 
+            stratify=dataset_df['difficulty'], 
+            random_state=42
+        )
         
-        return dataset
+        # Convert back to list of tuples
+        train_dataset = list(train_data.to_records(index=False))
+        val_dataset = list(val_data.to_records(index=False))
+        
+        # Save train/val datasets separately
+        train_file = output_file.replace('.pkl', '_train.pkl')
+        val_file = output_file.replace('.pkl', '_val.pkl')
+        
+        with open(train_file, 'wb') as f:
+            pickle.dump(train_dataset, f)
+        with open(val_file, 'wb') as f:
+            pickle.dump(val_dataset, f)
+        
+        logger.info(f"✅ Train dataset: {len(train_dataset)} samples → {train_file}")
+        logger.info(f"✅ Val dataset: {len(val_dataset)} samples → {val_file}")
+        
+        return train_dataset, val_dataset
 
     def encoding_to_state_2d(self, encoding: List[float]) -> List[List[int]]:
         """Convert enhanced encoding back to 2D state (for augmentation)"""
@@ -448,28 +470,23 @@ class EnhancedNumpuzNetwork(nn.Module):
         
         self.encoder = nn.Sequential(*encoder_layers)
         
-        # Policy head (predict next optimal move)
+        # Policy head (predict next optimal move) - PHASE1.md compliant
         self.policy_head = nn.Sequential(
-            nn.Linear(prev_size, 64),
+            nn.Linear(prev_size, 128),  # Tăng capacity
+            nn.BatchNorm1d(128),  # Thêm BatchNorm
             nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(64, 4),  # 4 possible moves
-            nn.Softmax(dim=1)
+            nn.Dropout(0.2),  # Tăng dropout
+            nn.Linear(128, 4),  # 4 possible moves
+            # Softmax sẽ apply với temperature scaling trong forward()
         )
+        self.policy_temperature = nn.Parameter(torch.ones(1))  # Learnable temperature
         
-        # Value head (estimate steps-to-solve / solvability)
+        # Value head (estimate steps-to-solve) - PHASE1.md: Linear activation
         self.value_head = nn.Sequential(
-            nn.Linear(prev_size, 64),
+            nn.Linear(prev_size, 32),  # Giảm complexity
             nn.ReLU(inplace=True),
-            nn.Linear(64, 1),
-            nn.Tanh()
-        )
-        
-        # Difficulty head (optional)
-        self.difficulty_head = nn.Sequential(
-            nn.Linear(prev_size, 32),
-            nn.ReLU(inplace=True),
-            nn.Linear(32, 4)  # 4 difficulty classes
+            nn.Linear(32, 1)
+            # REMOVED Tanh - use Linear + MSE loss (PHASE1.md)
         )
         
         # Initialize weights
@@ -493,11 +510,14 @@ class EnhancedNumpuzNetwork(nn.Module):
         x = self.encoder(x)
         
         # Output heads
-        policy = self.policy_head(x)
-        value = self.value_head(x)
-        difficulty = self.difficulty_head(x)
+        policy_logits = self.policy_head(x)
         
-        return policy, value, difficulty
+        # Apply temperature scaling + softmax (PHASE1.md)
+        policy = torch.softmax(policy_logits / self.policy_temperature, dim=1)
+        
+        value = self.value_head(x)
+        
+        return policy, value  # REMOVED difficulty output
 
 class OptimizedPhase1Trainer:
     """Optimized Phase 1 trainer with enhanced logging and monitoring"""
@@ -521,27 +541,34 @@ class OptimizedPhase1Trainer:
         # Print model summary
         self._print_model_summary()
         
-        # Optimizer and loss functions (FLOW.md compliant)
+        # Optimizer and loss functions (PHASE1.md compliant)
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config["learning_rate"],
-            weight_decay=config.get("weight_decay", 0.0)
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=config.get("weight_decay", 1e-4)  # Thêm regularization
         )
         
-        # Enhanced loss functions
-        self.policy_criterion = nn.CrossEntropyLoss()
+        # Loss functions with label smoothing (PHASE1.md)
+        self.policy_criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.value_criterion = nn.MSELoss()
-        self.difficulty_criterion = nn.CrossEntropyLoss()
+        # REMOVED: difficulty_criterion
         
-        # Learning rate scheduler - FIXED: removed verbose parameter
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', patience=10, factor=0.5
+        # Learning rate scheduler - CosineAnnealingWarmRestarts (PHASE1.md)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=10, T_mult=2, eta_min=1e-6
         )
+        
+        # Early stopping (PHASE1.md)
+        self.early_stopping_patience = 15
+        self.early_stopping_counter = 0
+        self.best_val_loss = float('inf')
         
         # Training history with comprehensive metrics
         self.history = {
             'epoch': [],
-            'train_loss': [], 'policy_loss': [], 'value_loss': [], 'difficulty_loss': [],
+            'train_loss': [], 'policy_loss': [], 'value_loss': [],  # REMOVED difficulty_loss
             'train_accuracy': [], 'learning_rate': [], 'epoch_time': [],
             'train_moves_accuracy': [], 'value_mae': []
         }
@@ -570,12 +597,62 @@ class OptimizedPhase1Trainer:
             if hasattr(module, 'weight'):
                 logger.info(f"   • {name}: {tuple(module.weight.shape)}")
     
+    def validate_epoch(self, dataloader: DataLoader, epoch: int) -> Dict[str, float]:
+        """Validation với comprehensive metrics (PHASE1.md compliant)"""
+        self.model.eval()
+        
+        metrics = {
+            'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0,  # REMOVED difficulty_loss
+            'correct_predictions': 0, 'total_samples': 0, 'value_errors': 0.0
+        }
+        
+        with torch.no_grad():
+            for states, action_targets, value_targets, difficulty_targets, optimal_moves in dataloader:
+                states = states.to(self.device, non_blocking=True)
+                action_targets = action_targets.to(self.device, non_blocking=True)
+                value_targets = value_targets.to(self.device, non_blocking=True)
+                
+                # Forward pass
+                policy_pred, value_pred = self.model(states)
+                
+                # Calculate losses
+                _, action_indices = torch.max(action_targets, 1)
+                policy_loss = self.policy_criterion(policy_pred, action_indices)
+                value_loss = self.value_criterion(value_pred.squeeze(), value_targets.squeeze())
+                
+                loss_weights = self.config.get("loss_weights", {"policy": 1.0, "value": 0.3})
+                total_loss = (loss_weights["policy"] * policy_loss + 
+                             loss_weights["value"] * value_loss)
+                
+                # Update metrics
+                batch_size = states.size(0)
+                metrics['total_loss'] += total_loss.item() * batch_size
+                metrics['policy_loss'] += policy_loss.item() * batch_size
+                metrics['value_loss'] += value_loss.item() * batch_size
+                
+                _, predicted = torch.max(policy_pred, 1)
+                metrics['correct_predictions'] += (predicted == action_indices).sum().item()
+                metrics['total_samples'] += batch_size
+                
+                metrics['value_errors'] += torch.abs(value_pred.squeeze() - value_targets.squeeze()).sum().item()
+        
+        # Calculate averages
+        avg_metrics = {
+            'val_loss': metrics['total_loss'] / metrics['total_samples'],
+            'val_policy_loss': metrics['policy_loss'] / metrics['total_samples'],
+            'val_value_loss': metrics['value_loss'] / metrics['total_samples'],
+            'val_accuracy': metrics['correct_predictions'] / metrics['total_samples'],
+            'val_value_mae': metrics['value_errors'] / metrics['total_samples']
+        }
+        
+        return avg_metrics
+    
     def train_epoch(self, dataloader: DataLoader, epoch: int) -> Dict[str, float]:
         """Enhanced training for one epoch with comprehensive metrics"""
         self.model.train()
         
         metrics = {
-            'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 'difficulty_loss': 0.0,
+            'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0,  # REMOVED difficulty_loss
             'correct_predictions': 0, 'total_samples': 0, 'value_errors': 0.0
         }
         
@@ -592,19 +669,17 @@ class OptimizedPhase1Trainer:
             
             # Forward pass
             self.optimizer.zero_grad()
-            policy_pred, value_pred, difficulty_pred = self.model(states)
+            policy_pred, value_pred = self.model(states)
             
-            # Calculate losses (FLOW.md: policy_loss + value_loss)
+            # Calculate losses (PHASE1.md: chỉ policy + value)
             _, action_indices = torch.max(action_targets, 1)
             policy_loss = self.policy_criterion(policy_pred, action_indices)
             value_loss = self.value_criterion(value_pred.squeeze(), value_targets.squeeze())
-            difficulty_loss = self.difficulty_criterion(difficulty_pred, difficulty_targets)
             
-            # Combined loss with weights (FLOW.md: lambda_policy=1.0, lambda_value=0.5)
-            loss_weights = self.config.get("loss_weights", {"policy": 1.0, "value": 0.5, "difficulty": 0.2})
+            # Combined loss with weights (PHASE1.md: policy=1.0, value=0.3)
+            loss_weights = self.config.get("loss_weights", {"policy": 1.0, "value": 0.3})
             total_loss = (loss_weights["policy"] * policy_loss + 
-                         loss_weights["value"] * value_loss + 
-                         loss_weights["difficulty"] * difficulty_loss)
+                         loss_weights["value"] * value_loss)
             
             # Backward pass with gradient clipping
             total_loss.backward()
@@ -616,7 +691,6 @@ class OptimizedPhase1Trainer:
             metrics['total_loss'] += total_loss.item() * batch_size
             metrics['policy_loss'] += policy_loss.item() * batch_size
             metrics['value_loss'] += value_loss.item() * batch_size
-            metrics['difficulty_loss'] += difficulty_loss.item() * batch_size
             
             # Accuracy calculations
             _, predicted = torch.max(policy_pred, 1)
@@ -639,16 +713,17 @@ class OptimizedPhase1Trainer:
         avg_metrics['total_loss'] = metrics['total_loss'] / metrics['total_samples']
         avg_metrics['policy_loss'] = metrics['policy_loss'] / metrics['total_samples']
         avg_metrics['value_loss'] = metrics['value_loss'] / metrics['total_samples']
-        avg_metrics['difficulty_loss'] = metrics['difficulty_loss'] / metrics['total_samples']
         avg_metrics['accuracy'] = metrics['correct_predictions'] / metrics['total_samples']
         avg_metrics['value_mae'] = metrics['value_errors'] / metrics['total_samples']
         
         return avg_metrics
     
     def train(self, train_loader: DataLoader, val_loader: DataLoader = None) -> Dict[str, List]:
-        """Enhanced main training loop with comprehensive logging"""
+        """Enhanced main training loop with validation (PHASE1.md compliant)"""
         logger.info(f"\n🎯 Starting Phase 1 Training for {self.board_size}x{self.board_size}")
         logger.info(f"📊 Training samples: {len(train_loader.dataset):,}")
+        if val_loader:
+            logger.info(f"📊 Validation samples: {len(val_loader.dataset):,}")
         logger.info(f"⏰ Epochs: {self.config['epochs']}")
         logger.info(f"📦 Batch size: {self.config['batch_size']}")
         logger.info(f"📈 Learning rate: {self.config['learning_rate']}")
@@ -657,37 +732,88 @@ class OptimizedPhase1Trainer:
         self.start_time = time.time()
         best_accuracy = 0.0
         
+        # Thêm validation metrics vào history
+        self.history['val_loss'] = []
+        self.history['val_accuracy'] = []
+        self.history['val_policy_loss'] = []
+        self.history['val_value_loss'] = []
+        self.history['val_value_mae'] = []
+        self.history['train_val_gap'] = []
+        
         for epoch in range(self.config["epochs"]):
             epoch_start = time.time()
             
             # Train one epoch
             epoch_metrics = self.train_epoch(train_loader, epoch)
+            
+            # Validate (PHASE1.md: every epoch)
+            if val_loader:
+                val_metrics = self.validate_epoch(val_loader, epoch)
+                
+                # Update validation history
+                self.history['val_loss'].append(val_metrics['val_loss'])
+                self.history['val_accuracy'].append(val_metrics['val_accuracy'])
+                self.history['val_policy_loss'].append(val_metrics['val_policy_loss'])
+                self.history['val_value_loss'].append(val_metrics['val_value_loss'])
+                self.history['val_value_mae'].append(val_metrics['val_value_mae'])
+                
+                # Calculate train-val gap (overfitting indicator)
+                train_val_gap = abs(epoch_metrics['accuracy'] - val_metrics['val_accuracy'])
+                self.history['train_val_gap'].append(train_val_gap)
+                
+                # Early stopping check (PHASE1.md)
+                if val_metrics['val_loss'] < self.best_val_loss:
+                    self.best_val_loss = val_metrics['val_loss']
+                    self.early_stopping_counter = 0
+                    
+                    # Save best model
+                    self.save_checkpoint(f"numpuz_{self.board_size}x{self.board_size}_best.pth")
+                    logger.info(f"🎯 New best validation loss: {self.best_val_loss:.4f}")
+                else:
+                    self.early_stopping_counter += 1
+                    
+                    if self.early_stopping_counter >= self.early_stopping_patience:
+                        logger.info(f"⚠️  Early stopping triggered at epoch {epoch+1}")
+                        logger.info(f"   No improvement for {self.early_stopping_patience} epochs")
+                        break
+                
+                # Warning nếu overfit
+                if train_val_gap > 0.15:  # PHASE1.md: threshold 15%
+                    logger.warning(f"⚠️  High train-val gap: {train_val_gap*100:.2f}% (possible overfitting)")
+            
             epoch_time = time.time() - epoch_start
             
-            # Update learning rate scheduler
-            self.scheduler.step(epoch_metrics['total_loss'])
+            # Update learning rate scheduler (CosineAnnealingWarmRestarts)
+            self.scheduler.step()
             
             # Update history
             self.history['epoch'].append(epoch + 1)
             self.history['train_loss'].append(epoch_metrics['total_loss'])
             self.history['policy_loss'].append(epoch_metrics['policy_loss'])
             self.history['value_loss'].append(epoch_metrics['value_loss'])
-            self.history['difficulty_loss'].append(epoch_metrics['difficulty_loss'])
+            # REMOVED: difficulty_loss
             self.history['train_accuracy'].append(epoch_metrics['accuracy'])
             self.history['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
             self.history['epoch_time'].append(epoch_time)
             self.history['value_mae'].append(epoch_metrics['value_mae'])
             
-            # Print epoch summary
-            logger.info(
+            # Enhanced logging với validation metrics
+            log_msg = (
                 f"📅 Epoch {epoch+1:3d}/{self.config['epochs']} | "
-                f"Loss: {epoch_metrics['total_loss']:.4f} | "
-                f"Policy: {epoch_metrics['policy_loss']:.4f} | "
-                f"Value: {epoch_metrics['value_loss']:.4f} | "
-                f"Acc: {epoch_metrics['accuracy']*100:6.2f}% | "
-                f"LR: {self.optimizer.param_groups[0]['lr']:.2e} | "
-                f"Time: {epoch_time:5.2f}s"
+                f"Train Loss: {epoch_metrics['total_loss']:.4f} | "
+                f"Train Acc: {epoch_metrics['accuracy']*100:6.2f}%"
             )
+            
+            if val_loader:
+                log_msg += (
+                    f" | Val Loss: {val_metrics['val_loss']:.4f} | "
+                    f"Val Acc: {val_metrics['val_accuracy']*100:6.2f}% | "
+                    f"Gap: {train_val_gap*100:5.2f}%"
+                )
+            
+            log_msg += f" | LR: {self.optimizer.param_groups[0]['lr']:.2e} | Time: {epoch_time:5.2f}s"
+            
+            logger.info(log_msg)
             
             # Save best model
             if epoch_metrics['accuracy'] > best_accuracy:
@@ -736,10 +862,15 @@ class OptimizedPhase1Trainer:
         # 2. Loss Breakdown
         print("\n📉 LOSS BREAKDOWN (Last Epoch):")
         print("-" * 80)
-        print(f"Total Loss:             {self.history['train_loss'][-1]:>6.4f}")
+        print(f"Train Loss:             {self.history['train_loss'][-1]:>6.4f}")
         print(f"  ├─ Policy Loss:       {self.history['policy_loss'][-1]:>6.4f}")
-        print(f"  ├─ Value Loss:        {self.history['value_loss'][-1]:>6.4f}")
-        print(f"  └─ Difficulty Loss:   {self.history['difficulty_loss'][-1]:>6.4f}")
+        print(f"  └─ Value Loss:        {self.history['value_loss'][-1]:>6.4f}")
+        
+        if self.history.get('val_loss'):
+            print(f"\nValidation Loss:        {self.history['val_loss'][-1]:>6.4f}")
+            print(f"  ├─ Val Policy Loss:   {self.history['val_policy_loss'][-1]:>6.4f}")
+            print(f"  └─ Val Value Loss:    {self.history['val_value_loss'][-1]:>6.4f}")
+            print(f"\nTrain-Val Gap:          {self.history['train_val_gap'][-1]*100:>6.2f}%")
         
         # 3. Training Duration
         print("\n⏱️  TRAINING DURATION:")
@@ -1444,7 +1575,6 @@ class OptimizedPhase1Trainer:
 
 - **Policy Loss**: {self.history['policy_loss'][-1]:.4f}
 - **Value Loss**: {self.history['value_loss'][-1]:.4f}
-- **Difficulty Loss**: {self.history['difficulty_loss'][-1]:.4f}
 
 ## How to Load Model
 
@@ -1459,7 +1589,7 @@ model.eval()
 
 # Inference
 input_state = torch.randn(1, 117)
-policy, value, difficulty = model(input_state)
+policy, value = model(input_state)
 ```
 
 ---
@@ -1474,15 +1604,16 @@ policy, value, difficulty = model(input_state)
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle(f'NumpuzAI Training Progress - {self.board_size}x{self.board_size}', fontsize=16)
         
-        # Loss plot
+        # Loss plot với train/val comparison
         ax = axes[0, 0]
-        ax.plot(self.history['epoch'], self.history['train_loss'], label='Total Loss', linewidth=2)
-        ax.plot(self.history['epoch'], self.history['policy_loss'], label='Policy Loss', alpha=0.7)
-        ax.plot(self.history['epoch'], self.history['value_loss'], label='Value Loss', alpha=0.7)
-        ax.plot(self.history['epoch'], self.history['difficulty_loss'], label='Difficulty Loss', alpha=0.7)
+        ax.plot(self.history['epoch'], self.history['train_loss'], label='Train Loss', linewidth=2)
+        if self.history.get('val_loss'):
+            ax.plot(self.history['epoch'], self.history['val_loss'], label='Val Loss', linewidth=2, linestyle='--')
+        ax.plot(self.history['epoch'], self.history['policy_loss'], label='Policy Loss', alpha=0.5)
+        ax.plot(self.history['epoch'], self.history['value_loss'], label='Value Loss', alpha=0.5)
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
-        ax.set_title('Training Loss')
+        ax.set_title('Training & Validation Loss')
         ax.legend()
         ax.grid(True, alpha=0.3)
         
@@ -1544,18 +1675,20 @@ def run_optimized_phase1():
     config_3x3 = {
         "board_size": 3,
         "training_samples": 50000,
-        "epochs": 200,
-        "batch_size": 128,
-        "learning_rate": 0.001,
-        "weight_decay": 0.0,
+        "validation_split": 0.2,  # PHASE1.md: 20% validation
+        "epochs": 100,  # Giảm từ 200
+        "batch_size": 256,  # Tăng từ 128
+        "learning_rate": 0.0005,  # Giảm từ 0.001
+        "weight_decay": 1e-4,  # Thêm regularization
         "hidden_layers": [256, 128, 64],
         "loss_weights": {
             "policy": 1.0,
-            "value": 0.5,
-            "difficulty": 0.2
+            "value": 0.3  # Giảm từ 0.5
+            # REMOVED: difficulty
         },
         "checkpoint_interval": 10,
         "enable_augmentation": True,
+        "augmentation_factor": 4,  # 4x thay vì 8x (PHASE1.md)
         "move_range": [5, 20]  # FLOW.md: k ∈ [5,20]
     }
     
@@ -1572,39 +1705,52 @@ def run_optimized_phase1():
     logger.info("Starting optimized Phase 1 training pipeline")
     
     try:
-        # Step 1: Generate or load training data
-        data_file = 'puzzle_data/3x3_training_data.pkl'
-        if not os.path.exists(data_file):
+        # Step 1: Generate or load training data với validation split
+        train_file = 'puzzle_data/3x3_training_data_train.pkl'
+        val_file = 'puzzle_data/3x3_training_data_val.pkl'
+        
+        if not os.path.exists(train_file) or not os.path.exists(val_file):
             logger.info("📊 Step 1: Generating training dataset with A* solver...")
             generator = EnhancedPuzzleGenerator(board_size=3)
-            dataset = generator.generate_dataset(
+            generator.generate_dataset(
                 num_samples=config_3x3["training_samples"],
-                output_file=data_file,
-                enable_augmentation=config_3x3["enable_augmentation"]
+                output_file='puzzle_data/3x3_training_data.pkl',
+                enable_augmentation=config_3x3["enable_augmentation"],
+                validation_split=config_3x3["validation_split"]
             )
             logger.info("✅ Dataset generation completed!")
         else:
-            logger.info(f"📥 Found existing dataset: {data_file}")
+            logger.info(f"📥 Found existing datasets: {train_file}, {val_file}")
         
-        # Step 2: Load training data
+        # Step 2: Load training and validation data
         logger.info("📥 Step 2: Loading and preprocessing training data...")
-        dataset = OptimizedPuzzleDataset(data_file, board_size=3)
+        train_dataset = OptimizedPuzzleDataset(train_file, board_size=3)
+        val_dataset = OptimizedPuzzleDataset(val_file, board_size=3)
         
-        # Create optimized data loader
+        # Create optimized data loaders
         train_loader = DataLoader(
-            dataset,
+            train_dataset,
             batch_size=config_3x3["batch_size"],
             shuffle=True,
-            num_workers=0,  # Reduced to avoid multiprocessing issues
+            num_workers=0,
             pin_memory=True
         )
         
-        logger.info(f"✅ Loaded {len(dataset)} training samples")
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config_3x3["batch_size"],
+            shuffle=False,  # KHÔNG shuffle validation
+            num_workers=0,
+            pin_memory=True
+        )
         
-        # Step 3: Initialize and run training
+        logger.info(f"✅ Loaded {len(train_dataset)} training samples")
+        logger.info(f"✅ Loaded {len(val_dataset)} validation samples")
+                
+        # Step 3: Initialize and run training với validation
         logger.info("🎯 Step 3: Starting foundation model training...")
         trainer = OptimizedPhase1Trainer(config_3x3)
-        history = trainer.train(train_loader)
+        history = trainer.train(train_loader, val_loader)  # Pass validation loader
         
         logger.info("\n" + "=" * 80)
         logger.info("🎉 PHASE 1 COMPLETED SUCCESSFULLY!")

@@ -217,7 +217,6 @@ augmentation:
     - rotation_90: "Rotate puzzle 90° clockwise + transform actions"
     - rotation_180: "Rotate puzzle 180°"
     - flip_horizontal: "Mirror horizontally + swap left/right actions"
-    # REMOVED: Các combinations phức tạp → Dễ overfit
   
   synchronization: "Actions transformed consistently with state"
   
